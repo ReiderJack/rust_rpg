@@ -61,13 +61,13 @@ fn main() {
             (
                 apply_velocity,
                 move_paddle,
-                check_for_collisions,
+                check_for_collisions_ball,
                 play_collision_sound,
             )
                 // `chain`ing systems together runs them in order
                 .chain(),
         )
-        .add_systems(Update, (update_scoreboard, bevy::window::close_on_esc))
+        .add_systems(Update, (shoot_ball, update_scoreboard, bevy::window::close_on_esc))
         .run();
 }
 
@@ -171,6 +171,27 @@ struct Scoreboard {
 }
 
 // Add the game's entities to our world
+fn spawn_ball(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    asset_server: Res<AssetServer>,
+    start_position: Vec3,
+    ball_direction: Vec2
+) {
+
+    // Ball
+    commands.spawn((
+        MaterialMesh2dBundle {
+            mesh: meshes.add(shape::Circle::default().into()).into(),
+            material: materials.add(ColorMaterial::from(BALL_COLOR)),
+            transform: Transform::from_translation(start_position).with_scale(BALL_SIZE),
+            ..default()
+        },
+        Ball,
+        Velocity(ball_direction.normalize() * BALL_SPEED),
+    ));
+}
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -204,17 +225,6 @@ fn setup(
         Collider,
     ));
 
-    // Ball
-    commands.spawn((
-        MaterialMesh2dBundle {
-            mesh: meshes.add(shape::Circle::default().into()).into(),
-            material: materials.add(ColorMaterial::from(BALL_COLOR)),
-            transform: Transform::from_translation(BALL_STARTING_POSITION).with_scale(BALL_SIZE),
-            ..default()
-        },
-        Ball,
-        Velocity(INITIAL_BALL_DIRECTION.normalize() * BALL_SPEED),
-    ));
 
     // Scoreboard
     commands.spawn(
@@ -300,8 +310,24 @@ fn setup(
             ));
         }
     }
+    
+    spawn_ball(commands, meshes, materials, asset_server, BALL_STARTING_POSITION, INITIAL_BALL_DIRECTION);
 }
 
+fn shoot_ball(
+    commands: Commands,
+    meshes: ResMut<Assets<Mesh>>,
+    materials: ResMut<Assets<ColorMaterial>>,
+    asset_server: Res<AssetServer>,
+    keyboard_input: Res<Input<KeyCode>>,
+    mut query: Query<&mut Transform, With<Paddle>>,
+) {
+    if keyboard_input.pressed(KeyCode::Space) {
+        let mut ball_position = query.single_mut().translation;
+        ball_position.y += PADDLE_SIZE.y * 2.0;
+        spawn_ball(commands, meshes, materials, asset_server, ball_position, Vec2{x: 0.0, y: 1.0})
+    }
+}
 fn move_paddle(
     keyboard_input: Res<Input<KeyCode>>,
     mut query: Query<&mut Transform, With<Paddle>>,
@@ -357,56 +383,60 @@ fn update_scoreboard(scoreboard: Res<Scoreboard>, mut query: Query<&mut Text>) {
     text.sections[1].value = scoreboard.score.to_string();
 }
 
-fn check_for_collisions(
+fn check_for_collisions_ball(
     mut commands: Commands,
     mut scoreboard: ResMut<Scoreboard>,
-    mut ball_query: Query<(&mut Velocity, &Transform), With<Ball>>,
+    mut ball_query: Query<(Entity, &mut Velocity, &Transform), With<Ball>>,
     collider_query: Query<(Entity, &Transform, Option<&Brick>), With<Collider>>,
     mut collision_events: EventWriter<CollisionEvent>,
 ) {
-    let (mut ball_velocity, ball_transform) = ball_query.single_mut();
-    let ball_size = ball_transform.scale.truncate();
 
-    // check collision with walls
-    for (collider_entity, transform, maybe_brick) in &collider_query {
-        let collision = collide(
-            ball_transform.translation,
-            ball_size,
-            transform.translation,
-            transform.scale.truncate(),
-        );
-        if let Some(collision) = collision {
-            // Sends a collision event so that other systems can react to the collision
-            collision_events.send_default();
+    for (ball_entity, mut ball_velocity, ball_transform) in &mut ball_query {
+        let ball_size = ball_transform.scale.truncate();
 
-            // Bricks should be despawned and increment the scoreboard on collision
-            if maybe_brick.is_some() {
-                scoreboard.score += 1;
-                commands.entity(collider_entity).despawn();
-            }
+        // check collision with walls
+        for (collider_entity, transform, maybe_brick) in &collider_query {
+            let collision = collide(
+                ball_transform.translation,
+                ball_size,
+                transform.translation,
+                transform.scale.truncate(),
+            );
+            if let Some(collision) = collision {
+                // Sends a collision event so that other systems can react to the collision
+                collision_events.send_default();
 
-            // reflect the ball when it collides
-            let mut reflect_x = false;
-            let mut reflect_y = false;
+                // Bricks should be despawned and increment the scoreboard on collision
+                if maybe_brick.is_some() {
+                    scoreboard.score += 1;
+                    commands.entity(collider_entity).despawn();
+                }
 
-            // only reflect if the ball's velocity is going in the opposite direction of the
-            // collision
-            match collision {
-                Collision::Left => reflect_x = ball_velocity.x > 0.0,
-                Collision::Right => reflect_x = ball_velocity.x < 0.0,
-                Collision::Top => reflect_y = ball_velocity.y < 0.0,
-                Collision::Bottom => reflect_y = ball_velocity.y > 0.0,
-                Collision::Inside => { /* do nothing */ }
-            }
+                // reflect the ball when it collides
+                let mut reflect_x = false;
+                let mut reflect_y = false;
 
-            // reflect velocity on the x-axis if we hit something on the x-axis
-            if reflect_x {
-                ball_velocity.x = -ball_velocity.x;
-            }
+                // only reflect if the ball's velocity is going in the opposite direction of the
+                // collision
+                match collision {
+                    Collision::Left => reflect_x = ball_velocity.x > 0.0,
+                    Collision::Right => reflect_x = ball_velocity.x < 0.0,
+                    Collision::Top => reflect_y = ball_velocity.y < 0.0,
+                    Collision::Bottom => reflect_y = ball_velocity.y > 0.0,
+                    Collision::Inside => { /* do nothing */ }
+                }
 
-            // reflect velocity on the y-axis if we hit something on the y-axis
-            if reflect_y {
-                ball_velocity.y = -ball_velocity.y;
+                // reflect velocity on the x-axis if we hit something on the x-axis
+                if reflect_x {
+                    ball_velocity.x = -ball_velocity.x;
+                }
+
+                // reflect velocity on the y-axis if we hit something on the y-axis
+                if reflect_y {
+                    ball_velocity.y = -ball_velocity.y;
+                }
+
+               commands.entity(ball_entity).despawn(); 
             }
         }
     }
